@@ -7,7 +7,7 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "elsboo" }]
 keywords = ["mcp", "upnote", "notes", "sqlite"]
-dependencies = ["mcp>=1.2.0"]
+dependencies = ["mcp>=1.2.0,<2"]
 
 [project.urls]
 Homepage = "https://github.com/AwesomeHye/upnote-lens-mcp"
