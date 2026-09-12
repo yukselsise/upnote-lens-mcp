@@ -17,13 +17,18 @@ mcp = FastMCP("upnote-lens")
 
 
 @mcp.tool()
-def search_notes(query: str, limit: int = 20) -> list[dict]:
-    """Search notes by title/body (case-insensitive substring match).
+def search_notes(query: str, limit: int = 20, fuzzy: bool = False) -> list[dict]:
+    """Search notes by title/body (Turkish-aware case-insensitive substring).
+
+    Case folding handles the Turkish dotted/dotless i correctly, so "İSTANBUL",
+    "istanbul" and "İstanbul" all match each other. Set fuzzy=true to also
+    ignore diacritics (ş/ğ/ü/ö/ç/ı match s/g/u/o/c/i), which is useful when the
+    query was typed without Turkish characters.
 
     Returns matching notes with id, title, last-updated time, and a text
     snippet around the match — actual content, read from the local DB.
     """
-    return db.search_notes(query, limit)
+    return db.search_notes(query, limit, fuzzy=fuzzy)
 
 
 @mcp.tool()

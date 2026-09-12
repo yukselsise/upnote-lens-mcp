@@ -77,17 +77,66 @@ def _connect():
         conn.close()
 
 
-def _escape_like(term: str) -> str:
-    """Escape LIKE wildcards so user input is matched literally."""
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+# Noktali/noktasiz i ailesinin tamami tek sinifa indirgeniyor: I, İ, ı, i -> i.
+#
+# Neden "Turkce dogru" olan I->ı esleme degil: Yuksel'in notlari karisik dilli.
+# Ingilizce "Istanbul" basligindaki I'yi Turkce kurala gore ı'ya katlarsak,
+# ASCII klavyeyle yazilan "istanbul" sorgusu artik o notu bulamaz — olculdu,
+# eski LIKE aramasinin buldugu 6 not sifira dusuyordu. Ters yon de ayni sekilde
+# kayipli. Tek sinifa indirgemek her iki yazimi da esler ve hicbir eslesmeyi
+# kaybettirmez; Unicode'un kok katlamasi da ayni yolu izler.
+#
+# Python'un .lower() metodu burada tek basina yetmez: "İ".lower() iki karakter
+# uretir ve uzunlugu bozar (snippet konumlari kayar).
+_TR_CASE = {"I": "i", "İ": "i", "ı": "i"}
+
+# Ikinci kademe (fuzzy): aksan dusurme, "gevsek" eslesme icin.
+_TR_ASCII = {
+    "ı": "i",
+    "ş": "s",
+    "ğ": "g",
+    "ü": "u",
+    "ö": "o",
+    "ç": "c",
+    "â": "a",
+    "î": "i",
+    "û": "u",
+}
 
 
-def _snippet(text: str | None, query: str, width: int = 160) -> str:
+def _tr_fold(s: str, ascii_fold: bool = False) -> str:
+    """Turkce duyarli kucuk harfe cevirme.
+
+    Karakter karakter calisir; cikti girdiyle **ayni uzunlukta** olur. Bu sart,
+    katlanmis metinde bulunan konumun orijinal metne birebir uymasi icin gerekli
+    (snippet dogru yerden kesilsin diye).
+
+    ascii_fold=True ise ayrica aksanlar dusurulur.
+    """
+    out = []
+    for ch in s:
+        c = _TR_CASE.get(ch)
+        if c is None:
+            low = ch.lower()
+            # Bazi harfler kucultulunce birden fazla karaktere acilir; uzunlugu
+            # korumak icin ilkini aliyoruz.
+            c = low if len(low) == 1 else (low[0] if low else ch)
+        if ascii_fold:
+            c = _TR_ASCII.get(c, c)
+        out.append(c)
+    return "".join(out)
+
+
+def _snippet(
+    text: str | None, query: str, width: int = 160, fuzzy: bool = False
+) -> str:
     """A short context window around the first match of `query`."""
     if not text:
         return ""
     flat = " ".join(text.split())
-    pos = flat.lower().find(query.lower())
+    # Konumu katlanmis metinde buluyoruz ama dilimi orijinalden aliyoruz;
+    # _tr_fold uzunlugu korudugu icin indeksler ortusuyor.
+    pos = _tr_fold(flat, fuzzy).find(_tr_fold(query, fuzzy))
     if pos < 0:
         return flat[:width] + ("…" if len(flat) > width else "")
     start = max(0, pos - width // 3)
@@ -105,28 +154,44 @@ def _ids_in_clause(ids: list[str]) -> tuple[str, list[str]]:
 # --- read tools ------------------------------------------------------------
 
 
-def search_notes(query: str, limit: int = 20) -> list[dict]:
-    """LIKE search over title and body; returns id/title/updated_at/snippet."""
-    like = f"%{_escape_like(query)}%"
+def search_notes(query: str, limit: int = 20, fuzzy: bool = False) -> list[dict]:
+    """Turkish-aware substring search over title and body.
+
+    Matching happens in Python, not in SQL: SQLite'in LIKE operatoru yalnizca
+    ASCII'de buyuk/kucuk harf duyarsizdir, yani "İstanbul" ile "istanbul" ya da
+    "IŞIK" ile "ışık" eslesmez. Gecerli notlarin tamamini cekip _tr_fold ile
+    karsilastiriyoruz; birkac yuz notluk bir veritabani icin tam tarama ucuz.
+
+    fuzzy=True aksanlari da dusurur ("gevsek" eslesme): "sarki" -> "şarkı".
+    """
+    if not query or not query.strip():
+        return []
     sql = f"""
         SELECT id, title, {_UPDATED_AT} AS updated_at, text
         FROM notes
         WHERE {VALID_NOTE}
-          AND (title LIKE ? ESCAPE '\\' OR text LIKE ? ESCAPE '\\')
         ORDER BY updatedAt DESC
-        LIMIT ?
     """
     with _connect() as conn:
-        rows = conn.execute(sql, (like, like, limit)).fetchall()
-    return [
-        {
-            "id": r["id"],
-            "title": r["title"],
-            "updated_at": r["updated_at"],
-            "snippet": _snippet(r["text"], query),
-        }
-        for r in rows
-    ]
+        rows = conn.execute(sql).fetchall()
+
+    needle = _tr_fold(query, fuzzy)
+    out: list[dict] = []
+    for r in rows:
+        title = r["title"] or ""
+        text = r["text"] or ""
+        if needle in _tr_fold(title, fuzzy) or needle in _tr_fold(text, fuzzy):
+            out.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "updated_at": r["updated_at"],
+                    "snippet": _snippet(text, query, fuzzy=fuzzy),
+                }
+            )
+            if len(out) >= limit:
+                break
+    return out
 
 
 def get_note(note_id: str, include_html: bool = False) -> dict | None:
