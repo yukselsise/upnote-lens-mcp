@@ -233,42 +233,33 @@ def list_recent(limit: int = 20) -> list[dict]:
 def list_notebooks() -> list[dict]:
     """All notebooks with their note counts (from notebooks.notes JSON)."""
     sql = """
-        SELECT id, title, notes, parent
+        SELECT id, title, parent
         FROM notebooks
         WHERE deleted = 0
         ORDER BY title COLLATE NOCASE
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
-    out = []
-    for r in rows:
-        try:
-            note_ids = json.loads(r["notes"]) if r["notes"] else []
-        except (ValueError, TypeError):
-            note_ids = []
-        out.append(
+        return [
             {
                 "id": r["id"],
                 "title": r["title"],
-                "note_count": len(note_ids),
+                "note_count": len(_notebook_note_ids(conn, r["id"])),
                 "parent": r["parent"] or None,
             }
-        )
-    return out
+            for r in rows
+        ]
 
 
 def list_notes_in_notebook(notebook_id: str, limit: int = 50) -> list[dict]:
     """Notes belonging to a notebook, resolved via notebooks.notes JSON."""
     with _connect() as conn:
         nb = conn.execute(
-            "SELECT id, title, notes FROM notebooks WHERE id = ?", (notebook_id,)
+            "SELECT id FROM notebooks WHERE id = ?", (notebook_id,)
         ).fetchone()
         if nb is None:
             return []
-        try:
-            note_ids = json.loads(nb["notes"]) if nb["notes"] else []
-        except (ValueError, TypeError):
-            note_ids = []
+        note_ids = _notebook_note_ids(conn, notebook_id)
         if not note_ids:
             return []
         placeholders, params = _ids_in_clause(note_ids)
@@ -330,3 +321,81 @@ def list_notes_by_tag(tag_title: str, limit: int = 50) -> list[dict]:
         """
         rows = conn.execute(sql, [*params, limit]).fetchall()
     return [dict(r) for r in rows]
+
+
+def _json_ids(raw: object) -> list[str]:
+    """JSON dizisi tutan bir kolonu guvenle coz. Bos/NULL/bozuk -> []."""
+    try:
+        ids = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        return []
+    return ids if isinstance(ids, list) else []
+
+
+def _note_ids_of(row: sqlite3.Row) -> list[str]:
+    """notebooks.notes / tags.notes JSON dizisini guvenle coz."""
+    return _json_ids(row["notes"])
+
+
+def _notebook_note_ids(conn: sqlite3.Connection, notebook_id: str) -> list[str]:
+    """Bir defterin not id'leri.
+
+    Bu UpNote surumunde iliski ``lists`` tablosunda duruyor: ``notebooks_<id>``
+    anahtarli satirin ``content`` alani not id'lerinden olusan bir JSON dizisi.
+    ``notebooks.notes`` bu veritabaninda 16 defterin **hepsinde** bos ([]);
+    upstream'in dayandigi alan artik doldurulmuyor. Eski surumler icin ona
+    geri donus olarak bakiyoruz.
+    """
+    r = conn.execute(
+        "SELECT content FROM lists WHERE id = ? AND deleted = 0",
+        (f"notebooks_{notebook_id}",),
+    ).fetchone()
+    ids = _json_ids(r["content"]) if r is not None else []
+    if ids:
+        return ids
+    nb = conn.execute(
+        "SELECT notes FROM notebooks WHERE id = ?", (notebook_id,)
+    ).fetchone()
+    return _note_ids_of(nb) if nb is not None else []
+
+
+def notebooks_of_note(note_id: str) -> list[dict]:
+    """Notu iceren defterler (ters arama, notebooks.notes JSON'undan).
+
+    URL semasi defteri **adla** esledigi icin title da donuyor.
+    """
+    sql = """
+        SELECT id, title
+        FROM notebooks
+        WHERE deleted = 0
+        ORDER BY title COLLATE NOCASE
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+        return [
+            {"id": r["id"], "title": r["title"]}
+            for r in rows
+            if note_id in _notebook_note_ids(conn, r["id"])
+        ]
+
+
+def find_created_since(title: str, since_ms: float) -> dict | None:
+    """Verilen basliga sahip ve `since_ms`'ten sonra olusmus en yeni not.
+
+    supersede_note'un yoklama dongusu icin: yeni notun DB'ye gercekten
+    dustugunu dogrulamaya yariyor. Baslik birebir eslesir -- UpNote ardisik
+    URL'lerde basligi bozabiliyor (bkz. docs/url-limits.md) ve o durumda
+    bulunamamasi istenen davranis.
+    """
+    sql = f"""
+        SELECT id, title, createdAt, {_UPDATED_AT} AS updated_at
+        FROM notes
+        WHERE {VALID_NOTE} AND title = ? AND createdAt >= ?
+        ORDER BY createdAt DESC
+        LIMIT 1
+    """
+    with _connect() as conn:
+        r = conn.execute(sql, (title, since_ms)).fetchone()
+    if r is None:
+        return None
+    return {"id": r["id"], "title": r["title"], "updated_at": r["updated_at"]}
