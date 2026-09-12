@@ -66,4 +66,11 @@ sızan karakterler. UpNote büyük bir URL'yi işlerken yenisi gelirse yarışma
 oluyor.
 
 Tek tek kullanımda sorun değil, ama toplu not oluşturmada çağrılar arasına
-birkaç saniye koymak gerekir. Kodda otomatik bekleme yok.
+birkaç saniye koymak gerekir. `create_note` kendi başına bekleme yapmaz.
+
+`supersede_note` bu yarışı kapatıyor: iki URL'yi (`note/new` ve `openNote`)
+peş peşe göndermek yerine, arada `_wait_for_note` ile yeni notun veritabanında
+göründüğünü doğruluyor — 0,5 saniye aralıkla, en fazla 15 saniye. Doğrulama
+başarısızsa eski not hiç açılmıyor ve sonuç `status: "created_unverified"`
+dönüyor. Ölçüm: normal durumda bekleme 0,6 saniye; hiç oluşmayan bir başlıkta
+15,3 saniyede `None`.

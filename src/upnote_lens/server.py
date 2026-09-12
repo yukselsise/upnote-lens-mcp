@@ -102,6 +102,28 @@ def create_note(
 
 
 @mcp.tool()
+def supersede_note(
+    note_id: str, content: str, title: str | None = None
+) -> dict:
+    """Write a new version of a note as a SEPARATE note.
+
+    Does NOT modify or delete the old note. UpNote's URL scheme has no edit
+    endpoint, and this workflow is intentional: the new version is created as
+    its own note, in the same notebook, and the old one is then opened in the
+    app so the user can review and delete it by hand.
+
+    title defaults to the old note's title. content is Markdown and is capped
+    at 256 KB, like create_note.
+
+    The old note is only opened after the new one has been confirmed to exist
+    in the database. If confirmation times out (15 s), the result comes back
+    with status "created_unverified", nothing is opened, and the old note must
+    be kept.
+    """
+    return writer.supersede_note(note_id, content, title)
+
+
+@mcp.tool()
 def open_note(note_id: str, new_window: bool = False) -> dict:
     """Open an existing note in the UpNote app by its id."""
     return {"status": "launched", "url": writer.open_note(note_id, new_window)}

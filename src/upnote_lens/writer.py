@@ -13,7 +13,10 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import time
 from urllib.parse import quote, urlencode
+
+from . import db
 
 # Icerik ust siniri. Olcum (macOS, 2026-09-12): 512 KB'lik bir not sorunsuz
 # olusuyor, 1 MB'lik ise `open` cagrisinda patliyor:
@@ -27,6 +30,14 @@ from urllib.parse import quote, urlencode
 # 256 KB esigi en kotu 3x sismede bile ~768 KB URL demek; ARG_MAX'a 256 KB
 # pay kaliyor. Kanitlanmis 512 KB'in yarisi.
 MAX_NOTE_BYTES = 256 * 1024
+
+# Yeni notun DB'ye dusmesini bekleme parametreleri. UpNote URL'yi
+# asenkron isliyor; "olustu" demeden once kaydi gormemiz gerek.
+_WAIT_TIMEOUT_S = 15.0
+_WAIT_POLL_S = 0.5
+
+# Saat kaymasi ve ms yuvarlamasi icin geriye dogru pay.
+_WAIT_CLOCK_SLACK_MS = 1000
 
 _CREATE_NOTE = "upnote://x-callback-url/note/new"
 _OPEN_NOTE = "upnote://x-callback-url/openNote"
@@ -117,3 +128,83 @@ def open_note(note_id: str, new_window: bool = False) -> str:
 def open_notebook(notebook_id: str) -> str:
     """Open a notebook by id. Returns the launched URL."""
     return _open_url(_build_url(_OPEN_NOTEBOOK, {"notebookId": notebook_id}))
+
+
+def _wait_for_note(title: str, since_ms: float) -> dict | None:
+    """`title` baslikli, `since_ms`'ten sonra olusmus notu DB'de bekle.
+
+    UpNote URL'leri asenkron isliyor: `open` donduginde not henuz yazilmamis
+    olabilir. En fazla 15 saniye, 0,5 saniye araliklarla yokluyoruz.
+
+    Bulunamazsa None -- cagiran taraf bunu "olustu ama dogrulanamadi" olarak
+    ele almali, olustu varsaymamali.
+    """
+    deadline = time.monotonic() + _WAIT_TIMEOUT_S
+    while True:
+        found = db.find_created_since(title, since_ms)
+        if found is not None:
+            return found
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(_WAIT_POLL_S)
+
+
+def supersede_note(
+    note_id: str, content: str, title: str | None = None
+) -> dict:
+    """Notun yeni bir surumunu ayri bir not olarak olustur; eskisine dokunma.
+
+    Is akisi: var olan not duzenlenmez. Yeni surum yeni bir not olarak
+    olusturulur, eski not kullanici tarafindan elle silinir.
+
+    Eski not UpNote'ta ancak yenisinin veritabaninda gorundugu dogrulandiktan
+    sonra aciliyor. Iki sebep: (a) yeni not olusmadiysa kullaniciyi eskisini
+    silmeye davet etmemeliyiz, (b) iki upnote:// URL'sini pespese gondermek
+    yarisa yol aciyor -- olculdu, bir notun basligi bozuk olusmustu
+    (bkz. docs/url-limits.md).
+    """
+    if not content or not content.strip():
+        raise ValueError(
+            "Icerik bos olamaz.\nContent must not be empty."
+        )
+    _check_size(content)
+
+    old = db.get_note(note_id)
+    if old is None:
+        raise ValueError(
+            f"Not bulunamadi: {note_id}\nNote not found: {note_id}"
+        )
+
+    notebooks = db.notebooks_of_note(note_id)
+    notebook = notebooks[0]["title"] if notebooks else None
+    new_title = title or old["title"]
+
+    since_ms = time.time() * 1000 - _WAIT_CLOCK_SLACK_MS
+    create_url = create_note(
+        title=new_title, content=content, notebook=notebook, markdown=True
+    )
+
+    created = _wait_for_note(new_title, since_ms)
+    result: dict = {
+        "old_note_id": note_id,
+        "old_title": old["title"],
+        "notebook": notebook,
+        "launched_create_url": create_url,
+    }
+    if created is None:
+        result["status"] = "created_unverified"
+        result["next_step"] = (
+            f"Yeni not {int(_WAIT_TIMEOUT_S)} saniye icinde veritabaninda "
+            "gorunmedi. UpNote'u kontrol edin; eski not ACILMADI ve "
+            "silinmemelidir."
+        )
+        return result
+
+    # Yeni not dogrulandi; simdi eskisini acmak guvenli.
+    result["new_note_id"] = created["id"]
+    result["launched_open_url"] = open_note(note_id)
+    result["status"] = "ok"
+    result["next_step"] = (
+        "Eski not UpNote'ta acildi; icerigi dogrulayip eskisini elle silin."
+    )
+    return result
