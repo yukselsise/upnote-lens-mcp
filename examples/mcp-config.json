@@ -1,8 +1,16 @@
 {
+  "_comment": "Claude Desktop: paste the mcpServers block into claude_desktop_config.json. Claude Code: run the command in _claude_code instead.",
+  "_claude_code": "claude mcp add upnote -- /Users/yukselsise/.local/bin/uv run --directory /Users/yukselsise/Developer/upnote-mcp upnote-lens-mcp",
+  "_note_uv_path": "If 'uv' is on PATH for the app launching the server, the bare command 'uv' works. GUI apps often do not inherit your shell PATH, so the absolute path /Users/yukselsise/.local/bin/uv is the safer choice.",
   "mcpServers": {
-    "upnote-lens": {
-      "command": "uvx",
-      "args": ["upnote-lens-mcp"]
+    "upnote": {
+      "command": "/Users/yukselsise/.local/bin/uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/yukselsise/Developer/upnote-mcp",
+        "upnote-lens-mcp"
+      ]
     }
   }
 }

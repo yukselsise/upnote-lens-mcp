@@ -2,6 +2,20 @@
 
 <!-- mcp-name: io.github.AwesomeHye/upnote-lens-mcp -->
 
+## About this fork
+
+Measured against a real UpNote database (macOS, 225 notes, 2026-09-12):
+
+- **WAL notes were invisible.** The connection used `immutable=1`, which tells SQLite to ignore the `-wal` file. UpNote runs in WAL mode and does not checkpoint on quit, so six days' worth of recent notes never showed up. Now `mode=ro`, still read-only, writes still rejected.
+- **Notebook and tag tools silently returned nothing.** `notebooks.notes` is `[]` for all 16 notebooks and `tags.notes` is `[]` for all 1137 tags in this version. The real links live in `lists` (`notebooks_<id>` rows) and in `notes.tagLinks` (slug form). Notebook counts went from 0 to 219 notes, tags from 0 to 1014 in use.
+- **Turkish-aware search.** SQLite `LIKE` folds case for ASCII only, so `İstanbul` never matched `istanbul`. Matching moved into Python; `fuzzy=True` also drops diacritics.
+- **Note size is capped.** `create_note` rejects content over 256 KB instead of failing at the OS level — `open` dies with `Argument list too long` past ~1 MB of percent-encoded URL.
+- **New `supersede_note` tool.** Writes a new version as a separate note in the same notebook, waits for it to appear in the database, then opens the old one for you to delete by hand. It never modifies or deletes the old note.
+
+- **`mcp` is pinned to `<2`.** Resolving freely pulls mcp 2.x, where `FastMCP` was renamed and the server fails to import at all. Migrating to the 2.x API is still open.
+
+See `docs/` for the measurements and `CLAUDE.md` for the schema facts.
+
 A hybrid MCP server that lets your AI assistant work with your UpNote notes:
 
 - **🔍 Find & search** notes by keyword across titles and bodies.
