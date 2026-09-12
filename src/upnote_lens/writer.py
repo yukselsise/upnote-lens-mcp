@@ -15,6 +15,19 @@ import platform
 import subprocess
 from urllib.parse import quote, urlencode
 
+# Icerik ust siniri. Olcum (macOS, 2026-09-12): 512 KB'lik bir not sorunsuz
+# olusuyor, 1 MB'lik ise `open` cagrisinda patliyor:
+#   OSError: [Errno 7] Argument list too long: 'open'
+# Sinir UpNote'un URL semasindan degil, isletim sisteminden geliyor --
+# `open` execve() ile calisir ve tum argv+env ARG_MAX icine sigmak zorunda
+# (bu makinede 1 MiB). Yuzde kodlamasi metni sisiriyor: saf ASCII'de ~1.11x,
+# ama her Turkce karakter (UTF-8'de 2 bayt) 6 karaktere, emoji 12 karaktere
+# cikabiliyor. En kotu durumda her bayt "%XX" olur, yani 3x.
+#
+# 256 KB esigi en kotu 3x sismede bile ~768 KB URL demek; ARG_MAX'a 256 KB
+# pay kaliyor. Kanitlanmis 512 KB'in yarisi.
+MAX_NOTE_BYTES = 256 * 1024
+
 _CREATE_NOTE = "upnote://x-callback-url/note/new"
 _OPEN_NOTE = "upnote://x-callback-url/openNote"
 _OPEN_NOTEBOOK = "upnote://x-callback-url/openNotebook"
@@ -51,6 +64,20 @@ def _open_url(url: str) -> str:
     return url
 
 
+def _check_size(content: str | None) -> None:
+    """Icerik ARG_MAX sinirina takilacaksa, URL'yi hic acmadan hata ver."""
+    if not content:
+        return
+    size = len(content.encode("utf-8"))
+    if size > MAX_NOTE_BYTES:
+        raise ValueError(
+            f"Not icerigi cok uzun: {size} bayt, ust sinir {MAX_NOTE_BYTES} bayt. "
+            "Notu birden fazla parcaya bolun.\n"
+            f"Note content too long: {size} bytes, limit {MAX_NOTE_BYTES} bytes. "
+            "Split the note into smaller parts."
+        )
+
+
 # --- write tools -----------------------------------------------------------
 
 
@@ -67,6 +94,7 @@ def create_note(
     parameter, and hashtags injected into the body stay as plain text rather
     than becoming real tags. Tag a note manually in the app afterwards.
     """
+    _check_size(content)
     params: dict[str, object] = {
         "title": title,
         "text": content,

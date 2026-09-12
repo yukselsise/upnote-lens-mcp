@@ -86,6 +86,9 @@ def create_note(
 
     content is treated as Markdown by default. notebook matches by name.
     Tags cannot be set via the URL scheme — tag the note manually in the app.
+    content is capped at 256 KB (UTF-8); longer content is rejected without
+    launching anything, because the OS cannot pass that long a URL to the app.
+    Split oversized notes into parts.
     Returns the launched upnote:// URL.
     """
     url = writer.create_note(
