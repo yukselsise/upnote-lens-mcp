@@ -33,9 +33,11 @@ def search_notes(query: str, limit: int = 20, fuzzy: bool = False) -> list[dict]
 
 @mcp.tool()
 def get_note(note_id: str, include_html: bool = False) -> dict:
-    """Return a single note's full title and body text by its id.
+    """Return a single note's full title, body text, notebook and tags.
 
-    Set include_html=true to also get the raw HTML body.
+    notebook is the name of the notebook holding the note (null if none), and
+    tags is the list of tag names on it. Set include_html=true to also get the
+    raw HTML body.
     """
     note = db.get_note(note_id, include_html=include_html)
     return note if note is not None else {"error": f"note not found: {note_id}"}
@@ -60,14 +62,21 @@ def list_notes_in_notebook(notebook_id: str, limit: int = 50) -> list[dict]:
 
 
 @mcp.tool()
-def list_tags() -> list[dict]:
-    """List all tags with their note counts."""
-    return db.list_tags()
+def list_tags(include_unused: bool = False) -> list[dict]:
+    """List tags with their note counts.
+
+    Tags no live note carries are hidden by default; set include_unused=true
+    to see them too (most of the tag table is such leftovers).
+    """
+    return db.list_tags(include_unused=include_unused)
 
 
 @mcp.tool()
 def list_notes_by_tag(tag_title: str, limit: int = 50) -> list[dict]:
-    """List notes carrying a given tag, matched by tag title."""
+    """List notes carrying a given tag, matched by tag title.
+
+    The leading "#" is optional and matching is case-insensitive.
+    """
     return db.list_notes_by_tag(tag_title, limit)
 
 

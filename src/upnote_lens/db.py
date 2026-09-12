@@ -63,6 +63,8 @@ def _connect():
     path = db_path()
     if not path.exists():
         raise FileNotFoundError(
+            f"UpNote veritabani bulunamadi: {path}\n"
+            "Baska bir yerdeyse UPNOTE_LENS_DB ortam degiskenini ayarlayin.\n"
             f"UpNote database not found at: {path}\n"
             "Set UPNOTE_LENS_DB to point at your upnote.sqlite3 if it lives elsewhere."
         )
@@ -151,6 +153,75 @@ def _ids_in_clause(ids: list[str]) -> tuple[str, list[str]]:
     return placeholders, ids
 
 
+def _json_ids(raw: object) -> list[str]:
+    """JSON dizisi tutan bir kolonu guvenle coz. Bos/NULL/bozuk -> []."""
+    try:
+        ids = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        return []
+    return ids if isinstance(ids, list) else []
+
+
+def _note_ids_of(row: sqlite3.Row) -> list[str]:
+    """notebooks.notes / tags.notes JSON dizisini guvenle coz."""
+    return _json_ids(row["notes"])
+
+
+def _notebook_note_ids(conn: sqlite3.Connection, notebook_id: str) -> list[str]:
+    """Bir defterin not id'leri.
+
+    Bu UpNote surumunde iliski ``lists`` tablosunda duruyor: ``notebooks_<id>``
+    anahtarli satirin ``content`` alani not id'lerinden olusan bir JSON dizisi.
+    ``notebooks.notes`` bu veritabaninda 16 defterin **hepsinde** bos ([]);
+    upstream'in dayandigi alan artik doldurulmuyor. Eski surumler icin ona
+    geri donus olarak bakiyoruz.
+    """
+    r = conn.execute(
+        "SELECT content FROM lists WHERE id = ? AND deleted = 0",
+        (f"notebooks_{notebook_id}",),
+    ).fetchone()
+    ids = _json_ids(r["content"]) if r is not None else []
+    if ids:
+        return ids
+    nb = conn.execute(
+        "SELECT notes FROM notebooks WHERE id = ?", (notebook_id,)
+    ).fetchone()
+    return _note_ids_of(nb) if nb is not None else []
+
+
+def _tag_slug(tag_title: str) -> str:
+    """Tag basligini notes.tagLinks'teki slug bicimine cevir.
+
+    tags.title "#Miguel-Caló" gibi, notes.tagLinks ise "miguel-caló" gibi
+    tutuyor: bas taraftaki "#" dusuyor ve harfler kuculuyor. Bu veritabaninda
+    76 notun 1.534 tagLink referansinin **tamami** bu kuralla eslesti (%100),
+    cakisan slug yok.
+    """
+    return (tag_title or "").lstrip("#").lower()
+
+
+def _tag_links_of(row: sqlite3.Row) -> list[str]:
+    """notes.tagLinks JSON dizisini guvenle coz."""
+    return _json_ids(row["tagLinks"])
+
+
+def _tag_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """slug -> o slug'i tasiyan gecerli not sayisi.
+
+    Kaynak notes.tagLinks. tags.notes alanina bakilmiyor: bu surumde 1137
+    tag'in hepsinde bos.
+    """
+    counts: dict[str, int] = {}
+    rows = conn.execute(
+        f"SELECT tagLinks FROM notes WHERE {VALID_NOTE} "
+        "AND tagLinks IS NOT NULL AND tagLinks NOT IN ('', '[]')"
+    ).fetchall()
+    for r in rows:
+        for slug in set(_tag_links_of(r)):
+            counts[slug] = counts.get(slug, 0) + 1
+    return counts
+
+
 # --- read tools ------------------------------------------------------------
 
 
@@ -195,21 +266,40 @@ def search_notes(query: str, limit: int = 20, fuzzy: bool = False) -> list[dict]
 
 
 def get_note(note_id: str, include_html: bool = False) -> dict | None:
-    """Full title + body text of a single note (optionally raw HTML too)."""
+    """Full title + body text of a single note, plus notebook and tag names."""
     sql = f"""
-        SELECT id, title, text, html, {_UPDATED_AT} AS updated_at
+        SELECT id, title, text, html, tagLinks, {_UPDATED_AT} AS updated_at
         FROM notes
         WHERE id = ?
     """
     with _connect() as conn:
         r = conn.execute(sql, (note_id,)).fetchone()
-    if r is None:
-        return None
+        if r is None:
+            return None
+        # Defter ters aramasi: notu iceren ilk defterin adi (URL semasi adla esler).
+        notebooks = [
+            nb["title"]
+            for nb in conn.execute(
+                "SELECT id, title FROM notebooks WHERE deleted = 0 "
+                "ORDER BY title COLLATE NOCASE"
+            ).fetchall()
+            if note_id in _notebook_note_ids(conn, nb["id"])
+        ]
+        # Tag ters aramasi: slug -> tag basligi. Bilinmeyen slug oldugu gibi kalir.
+        slugs = _tag_links_of(r)
+        titles_by_slug = {
+            _tag_slug(t["title"]): t["title"]
+            for t in conn.execute(
+                "SELECT title FROM tags WHERE deleted = 0"
+            ).fetchall()
+        }
     result = {
         "id": r["id"],
         "title": r["title"],
         "text": r["text"],
         "updated_at": r["updated_at"],
+        "notebook": notebooks[0] if notebooks else None,
+        "tags": [titles_by_slug.get(sl, sl) for sl in slugs],
     }
     if include_html:
         result["html"] = r["html"]
@@ -274,89 +364,59 @@ def list_notes_in_notebook(notebook_id: str, limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def list_tags() -> list[dict]:
-    """All tags with their note counts (from tags.notes JSON)."""
+def list_tags(include_unused: bool = False) -> list[dict]:
+    """All tags with their note counts (counted from notes.tagLinks).
+
+    Tags that no live note carries are hidden unless include_unused is true;
+    most of the tag table is such leftovers.
+    """
     sql = """
-        SELECT id, title, notes
+        SELECT id, title
         FROM tags
         WHERE deleted = 0
         ORDER BY title COLLATE NOCASE
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
+        counts = _tag_counts(conn)
     out = []
     for r in rows:
-        try:
-            note_ids = json.loads(r["notes"]) if r["notes"] else []
-        except (ValueError, TypeError):
-            note_ids = []
+        count = counts.get(_tag_slug(r["title"]), 0)
+        if count == 0 and not include_unused:
+            continue
         out.append(
-            {"id": r["id"], "title": r["title"], "note_count": len(note_ids)}
+            {"id": r["id"], "title": r["title"], "note_count": count}
         )
     return out
 
 
 def list_notes_by_tag(tag_title: str, limit: int = 50) -> list[dict]:
-    """Notes carrying a tag, matched by tag title (via tags.notes JSON)."""
-    with _connect() as conn:
-        tag = conn.execute(
-            "SELECT id, title, notes FROM tags WHERE title = ? COLLATE NOCASE",
-            (tag_title,),
-        ).fetchone()
-        if tag is None:
-            return []
-        try:
-            note_ids = json.loads(tag["notes"]) if tag["notes"] else []
-        except (ValueError, TypeError):
-            note_ids = []
-        if not note_ids:
-            return []
-        placeholders, params = _ids_in_clause(note_ids)
-        sql = f"""
-            SELECT id, title, {_UPDATED_AT} AS updated_at
-            FROM notes
-            WHERE id IN ({placeholders}) AND {VALID_NOTE}
-            ORDER BY updatedAt DESC
-            LIMIT ?
-        """
-        rows = conn.execute(sql, [*params, limit]).fetchall()
-    return [dict(r) for r in rows]
+    """Notes carrying a tag, matched by tag title (via notes.tagLinks).
 
-
-def _json_ids(raw: object) -> list[str]:
-    """JSON dizisi tutan bir kolonu guvenle coz. Bos/NULL/bozuk -> []."""
-    try:
-        ids = json.loads(raw) if raw else []
-    except (ValueError, TypeError):
-        return []
-    return ids if isinstance(ids, list) else []
-
-
-def _note_ids_of(row: sqlite3.Row) -> list[str]:
-    """notebooks.notes / tags.notes JSON dizisini guvenle coz."""
-    return _json_ids(row["notes"])
-
-
-def _notebook_note_ids(conn: sqlite3.Connection, notebook_id: str) -> list[str]:
-    """Bir defterin not id'leri.
-
-    Bu UpNote surumunde iliski ``lists`` tablosunda duruyor: ``notebooks_<id>``
-    anahtarli satirin ``content`` alani not id'lerinden olusan bir JSON dizisi.
-    ``notebooks.notes`` bu veritabaninda 16 defterin **hepsinde** bos ([]);
-    upstream'in dayandigi alan artik doldurulmuyor. Eski surumler icin ona
-    geri donus olarak bakiyoruz.
+    The leading "#" is optional and matching is case-insensitive, so "#TOTW",
+    "TOTW" and "totw" all work.
     """
-    r = conn.execute(
-        "SELECT content FROM lists WHERE id = ? AND deleted = 0",
-        (f"notebooks_{notebook_id}",),
-    ).fetchone()
-    ids = _json_ids(r["content"]) if r is not None else []
-    if ids:
-        return ids
-    nb = conn.execute(
-        "SELECT notes FROM notebooks WHERE id = ?", (notebook_id,)
-    ).fetchone()
-    return _note_ids_of(nb) if nb is not None else []
+    slug = _tag_slug(tag_title)
+    if not slug:
+        return []
+    sql = f"""
+        SELECT id, title, {_UPDATED_AT} AS updated_at, tagLinks
+        FROM notes
+        WHERE {VALID_NOTE}
+          AND tagLinks IS NOT NULL AND tagLinks NOT IN ('', '[]')
+        ORDER BY updatedAt DESC
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    out = []
+    for r in rows:
+        if slug in _tag_links_of(r):
+            out.append(
+                {"id": r["id"], "title": r["title"], "updated_at": r["updated_at"]}
+            )
+            if len(out) >= limit:
+                break
+    return out
 
 
 def notebooks_of_note(note_id: str) -> list[dict]:
