@@ -1,8 +1,13 @@
 """Read-only access to the local UpNote SQLite database.
 
 Everything here is read-only by design. The connection is opened with
-``mode=ro&immutable=1`` so we never take a write lock or risk corrupting the
-file that UpNote keeps in sync with the cloud.
+``mode=ro`` so we never take a write lock or risk corrupting the file that
+UpNote keeps in sync with the cloud.
+
+Bu fork'ta ``immutable=1`` kaldirildi: UpNote veritabani WAL modunda
+calisiyor ve ``immutable=1`` SQLite'a "-wal dosyasina hic bakma" dedigi
+icin son gunlerin notlari gorunmez oluyordu (olcum: 222 yerine 225 not,
+en yeni not 6 gun eski). ``mode=ro`` WAL'i okur; yazma yapmaz.
 
 Facts verified against a real UpNote DB (macOS, ~5.7k notes):
 - A note is "valid" when ``trashed=0 AND deleted=0 AND COALESCE(isTemplate,0)=0``.
@@ -61,7 +66,9 @@ def _connect():
             f"UpNote database not found at: {path}\n"
             "Set UPNOTE_LENS_DB to point at your upnote.sqlite3 if it lives elsewhere."
         )
-    uri = "file:" + quote(str(path)) + "?mode=ro&immutable=1"
+    # Salt okunur, ama immutable DEGIL: immutable=1 WAL'i gizler ve en son
+    # notlar kaybolur. mode=ro yazma kilidi almaz, checkpoint tetiklemez.
+    uri = "file:" + quote(str(path)) + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
